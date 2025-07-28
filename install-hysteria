@@ -2,128 +2,87 @@
 
 set -e
 
-SERVICE_NAME="hysteria"
-INSTALL_DIR="/etc/hysteria"
-BIN_PATH="/usr/local/bin/hysteria"
-CONFIG_PATH="$INSTALL_DIR/config.yaml"
-LOG_FILE="/var/log/hysteria.log"
+echo "🚀 Starting Hysteria 2 VPN Automated Installer (with Obfuscation)..."
 
-echo "🔧 Hysteria Installer - Pro Edition"
-echo "----------------------------------"
+# === Variables ===
+HYSTERIA_VERSION="v2.1.5"
+BINARY_URL="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64"
+INSTALL_PATH="/usr/local/bin/hysteria"
+CONFIG_DIR="/etc/hysteria"
+CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+PORT=443
+OBFS_PASS=$(openssl rand -hex 8)
+CERT_PATH="/etc/ssl/certs/hysteria.crt"
+KEY_PATH="/etc/ssl/private/hysteria.key"
+AUTH_PASSWORD=$(openssl rand -hex 6)
 
-# Check if already installed
-if systemctl is-active --quiet $SERVICE_NAME; then
-  echo "⚠️ Hysteria is already installed. Please uninstall first."
+# === Check root ===
+if [[ $EUID -ne 0 ]]; then
+  echo "❌ Please run as root"
   exit 1
 fi
 
-# Create install dir
-mkdir -p $INSTALL_DIR
+# === Install dependencies ===
+apt update && apt install -y curl wget openssl sudo
 
-# Prompt for config
-read -p "Enter port to use (default 5678): " PORT
-PORT=${PORT:-5678}
+# === Download binary ===
+echo "⬇️ Downloading Hysteria binary..."
+curl -L -o "$INSTALL_PATH" "$BINARY_URL"
+chmod +x "$INSTALL_PATH"
 
-# Check for port conflict
-if lsof -i:$PORT >/dev/null 2>&1; then
-  echo "❌ Port $PORT is already in use. Choose another."
-  exit 1
-fi
+# === Create config directory ===
+mkdir -p "$CONFIG_DIR"
 
-read -p "Set authentication password: " AUTH
-if [[ -z "$AUTH" ]]; then
-  echo "❌ Auth cannot be empty."
-  exit 1
-fi
+# === Generate self-signed cert ===
+echo "🔐 Generating self-signed TLS certificate..."
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$KEY_PATH" -out "$CERT_PATH" -days 365 \
+  -subj "/CN=HysteriaVPN"
 
-read -p "Enable obfuscation? (y/n): " USE_OBFS
-if [[ "$USE_OBFS" == "y" ]]; then
-  read -p "Enter obfuscation password: " OBFS_PASS
-  if [[ -z "$OBFS_PASS" ]]; then
-    echo "❌ Obfuscation password cannot be empty."
-    exit 1
-  fi
-fi
-
-read -p "Use self-signed TLS cert? (y = yes, n = use your own): " USE_TLS
-if [[ "$USE_TLS" == "y" ]]; then
-  echo "📜 Generating self-signed cert..."
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout $INSTALL_DIR/server.key -out $INSTALL_DIR/server.crt -days 365 -subj "/CN=localhost"
-  TLS_CONFIG="
-tls:
-  cert: $INSTALL_DIR/server.crt
-  key: $INSTALL_DIR/server.key"
-else
-  read -p "Enter full path to your TLS cert file: " TLS_CERT
-  read -p "Enter full path to your TLS key file: " TLS_KEY
-  TLS_CONFIG="
-tls:
-  cert: $TLS_CERT
-  key: $TLS_KEY"
-fi
-
-# Write config file
-cat > $CONFIG_PATH <<EOF
+# === Create config file ===
+cat > "$CONFIG_FILE" <<EOF
 listen: :$PORT
+tls:
+  cert: $CERT_PATH
+  key: $KEY_PATH
 auth:
   type: password
-  password: $AUTH
-$TLS_CONFIG
-bandwidth:
-  up: 100 mbps
-  down: 100 mbps
-EOF
-
-if [[ "$USE_OBFS" == "y" ]]; then
-cat >> $CONFIG_PATH <<EOF
+  password: "$AUTH_PASSWORD"
 obfs:
   type: salamander
-  password: $OBFS_PASS
+  password: "$OBFS_PASS"
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.google.com
+    rewriteHost: true
 EOF
-fi
 
-# Download binary
-echo "⬇️ Downloading Hysteria binary..."
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64) ARCH_TAG="amd64" ;;
-  aarch64) ARCH_TAG="arm64" ;;
-  *) echo "❌ Unsupported architecture: $ARCH"; exit 1 ;;
-esac
-
-LATEST=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep "browser_download_url.*linux-$ARCH_TAG" | cut -d '"' -f 4)
-curl -Lo hysteria $LATEST
-chmod +x hysteria
-mv hysteria $BIN_PATH
-
-# Systemd service
-echo "🛠️ Creating systemd service..."
-cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+# === Systemd service ===
+cat > /etc/systemd/system/hysteria.service <<EOF
 [Unit]
-Description=Hysteria2 VPN Server
+Description=Hysteria 2 VPN Server
 After=network.target
 
 [Service]
-ExecStart=$BIN_PATH server -c $CONFIG_PATH
-Restart=on-failure
-LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=$INSTALL_DIR
-StandardOutput=append:$LOG_FILE
-StandardError=append:$LOG_FILE
+ExecStart=$INSTALL_PATH server -c $CONFIG_FILE
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Start service
+# === Enable and start service ===
 systemctl daemon-reexec
 systemctl daemon-reload
-systemctl enable --now $SERVICE_NAME
+systemctl enable hysteria
+systemctl restart hysteria
 
-echo "✅ Hysteria installation complete."
-echo "🌐 Running on port $PORT with TLS and obfuscation: $USE_OBFS"
+# === Get server IP ===
+IP=$(curl -s ipv4.icanhazip.com)
+
+# === Output config URI ===
+echo -e "\n✅ Hysteria 2 Installed and Running!"
+echo -e "📱 Use this link in HTTP Injector or any Android client:\n"
+echo "hysteria2://$AUTH_PASSWORD@$IP:$PORT/?obfs-password=$OBFS_PASS&insecure=1"
+
+echo -e "\n✅ Configuration saved at: $CONFIG_FILE"
