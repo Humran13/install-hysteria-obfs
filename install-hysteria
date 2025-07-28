@@ -8,77 +8,99 @@ BIN_PATH="/usr/local/bin/hysteria"
 CONFIG_PATH="$INSTALL_DIR/config.yaml"
 LOG_FILE="/var/log/hysteria.log"
 
-echo "🔧 Installing Hysteria 2 with Obfuscation"
+echo "🔧 Hysteria Installer - Pro Edition"
+echo "----------------------------------"
 
+# Check if already installed
+if systemctl is-active --quiet $SERVICE_NAME; then
+  echo "⚠️ Hysteria is already installed. Please uninstall first."
+  exit 1
+fi
+
+# Create install dir
 mkdir -p $INSTALL_DIR
 
-read -p "Enter port to use [default 5678]: " PORT
+# Prompt for config
+read -p "Enter port to use (default 5678): " PORT
 PORT=${PORT:-5678}
 
+# Check for port conflict
 if lsof -i:$PORT >/dev/null 2>&1; then
-  echo "❌ Port $PORT is already in use."
+  echo "❌ Port $PORT is already in use. Choose another."
   exit 1
 fi
 
 read -p "Set authentication password: " AUTH
-[ -z "$AUTH" ] && echo "❌ Password required." && exit 1
+if [[ -z "$AUTH" ]]; then
+  echo "❌ Auth cannot be empty."
+  exit 1
+fi
 
-read -p "Use obfuscation? (y/n): " OBFS_ENABLE
-if [[ "$OBFS_ENABLE" == "y" ]]; then
+read -p "Enable obfuscation? (y/n): " USE_OBFS
+if [[ "$USE_OBFS" == "y" ]]; then
   read -p "Enter obfuscation password: " OBFS_PASS
-  [ -z "$OBFS_PASS" ] && echo "❌ Obfuscation password required." && exit 1
+  if [[ -z "$OBFS_PASS" ]]; then
+    echo "❌ Obfuscation password cannot be empty."
+    exit 1
+  fi
 fi
 
-read -p "Use self-signed TLS? (y/n): " USE_SELF_TLS
-if [[ "$USE_SELF_TLS" == "y" ]]; then
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$INSTALL_DIR/server.key" \
-    -out "$INSTALL_DIR/server.crt" -days 365 \
-    -subj "/CN=localhost"
-  TLS_CERT="$INSTALL_DIR/server.crt"
-  TLS_KEY="$INSTALL_DIR/server.key"
+read -p "Use self-signed TLS cert? (y = yes, n = use your own): " USE_TLS
+if [[ "$USE_TLS" == "y" ]]; then
+  echo "📜 Generating self-signed cert..."
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout $INSTALL_DIR/server.key -out $INSTALL_DIR/server.crt -days 365 -subj "/CN=localhost"
+  TLS_CONFIG="
+tls:
+  cert: $INSTALL_DIR/server.crt
+  key: $INSTALL_DIR/server.key"
 else
-  read -p "Path to TLS cert: " TLS_CERT
-  read -p "Path to TLS key: " TLS_KEY
+  read -p "Enter full path to your TLS cert file: " TLS_CERT
+  read -p "Enter full path to your TLS key file: " TLS_KEY
+  TLS_CONFIG="
+tls:
+  cert: $TLS_CERT
+  key: $TLS_KEY"
 fi
 
-cat > "$CONFIG_PATH" <<EOF
+# Write config file
+cat > $CONFIG_PATH <<EOF
 listen: :$PORT
 auth:
   type: password
   password: $AUTH
-tls:
-  cert: $TLS_CERT
-  key: $TLS_KEY
+$TLS_CONFIG
 bandwidth:
   up: 100 mbps
   down: 100 mbps
 EOF
 
-if [[ "$OBFS_ENABLE" == "y" ]]; then
-cat >> "$CONFIG_PATH" <<EOF
+if [[ "$USE_OBFS" == "y" ]]; then
+cat >> $CONFIG_PATH <<EOF
 obfs:
   type: salamander
   password: $OBFS_PASS
 EOF
 fi
 
+# Download binary
+echo "⬇️ Downloading Hysteria binary..."
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64) ARCH_TAG="amd64" ;;
   aarch64) ARCH_TAG="arm64" ;;
-  *) echo "❌ Unsupported architecture: $ARCH" && exit 1 ;;
+  *) echo "❌ Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-echo "📦 Downloading Hysteria binary..."
 LATEST=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep "browser_download_url.*linux-$ARCH_TAG" | cut -d '"' -f 4)
-curl -Lo hysteria "$LATEST"
+curl -Lo hysteria $LATEST
 chmod +x hysteria
-mv hysteria "$BIN_PATH"
+mv hysteria $BIN_PATH
 
+# Systemd service
+echo "🛠️ Creating systemd service..."
 cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
 [Unit]
-Description=Hysteria 2 VPN Server
+Description=Hysteria2 VPN Server
 After=network.target
 
 [Service]
@@ -98,8 +120,10 @@ StandardError=append:$LOG_FILE
 WantedBy=multi-user.target
 EOF
 
+# Start service
 systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable --now $SERVICE_NAME
 
-echo "✅ Hysteria 2 successfully installed and running on port $PORT"
+echo "✅ Hysteria installation complete."
+echo "🌐 Running on port $PORT with TLS and obfuscation: $USE_OBFS"
