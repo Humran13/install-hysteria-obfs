@@ -1,0 +1,105 @@
+#!/bin/bash
+
+set -e
+
+SERVICE_NAME="hysteria"
+INSTALL_DIR="/etc/hysteria"
+BIN_PATH="/usr/local/bin/hysteria"
+CONFIG_PATH="$INSTALL_DIR/config.yaml"
+LOG_FILE="/var/log/hysteria.log"
+
+echo "🔧 Installing Hysteria 2 with Obfuscation"
+
+mkdir -p $INSTALL_DIR
+
+read -p "Enter port to use [default 5678]: " PORT
+PORT=${PORT:-5678}
+
+if lsof -i:$PORT >/dev/null 2>&1; then
+  echo "❌ Port $PORT is already in use."
+  exit 1
+fi
+
+read -p "Set authentication password: " AUTH
+[ -z "$AUTH" ] && echo "❌ Password required." && exit 1
+
+read -p "Use obfuscation? (y/n): " OBFS_ENABLE
+if [[ "$OBFS_ENABLE" == "y" ]]; then
+  read -p "Enter obfuscation password: " OBFS_PASS
+  [ -z "$OBFS_PASS" ] && echo "❌ Obfuscation password required." && exit 1
+fi
+
+read -p "Use self-signed TLS? (y/n): " USE_SELF_TLS
+if [[ "$USE_SELF_TLS" == "y" ]]; then
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$INSTALL_DIR/server.key" \
+    -out "$INSTALL_DIR/server.crt" -days 365 \
+    -subj "/CN=localhost"
+  TLS_CERT="$INSTALL_DIR/server.crt"
+  TLS_KEY="$INSTALL_DIR/server.key"
+else
+  read -p "Path to TLS cert: " TLS_CERT
+  read -p "Path to TLS key: " TLS_KEY
+fi
+
+cat > "$CONFIG_PATH" <<EOF
+listen: :$PORT
+auth:
+  type: password
+  password: $AUTH
+tls:
+  cert: $TLS_CERT
+  key: $TLS_KEY
+bandwidth:
+  up: 100 mbps
+  down: 100 mbps
+EOF
+
+if [[ "$OBFS_ENABLE" == "y" ]]; then
+cat >> "$CONFIG_PATH" <<EOF
+obfs:
+  type: salamander
+  password: $OBFS_PASS
+EOF
+fi
+
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64) ARCH_TAG="amd64" ;;
+  aarch64) ARCH_TAG="arm64" ;;
+  *) echo "❌ Unsupported architecture: $ARCH" && exit 1 ;;
+esac
+
+echo "📦 Downloading Hysteria binary..."
+LATEST=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep "browser_download_url.*linux-$ARCH_TAG" | cut -d '"' -f 4)
+curl -Lo hysteria "$LATEST"
+chmod +x hysteria
+mv hysteria "$BIN_PATH"
+
+cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+[Unit]
+Description=Hysteria 2 VPN Server
+After=network.target
+
+[Service]
+ExecStart=$BIN_PATH server -c $CONFIG_PATH
+Restart=on-failure
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=$INSTALL_DIR
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable --now $SERVICE_NAME
+
+echo "✅ Hysteria 2 successfully installed and running on port $PORT"
